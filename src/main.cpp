@@ -12,6 +12,7 @@
 #include <ArduinoOTA.h>
 #include <credentials.h>
 #include <EspMQTTClient.h>
+#include <LinkedList.h>
 #include <MqttKalmanPublish.h>
 
 #define CLIENT_NAME "espPixelflutMatrix"
@@ -65,10 +66,13 @@ Adafruit_NeoMatrix matrix = Adafruit_NeoMatrix(32, 8, PIN_MATRIX,
   NEO_GRB            + NEO_KHZ800);
 
 
+WiFiServer pixelflutServer(1337);
+LinkedList<WiFiClient> pixelflutClients;
+
 MQTTKalmanPublish mkRssi(client, BASIC_TOPIC_STATUS "rssi", MQTT_RETAINED, 12 * 5 /* every 5 min */, 10);
 
 boolean on = true;
-uint8_t mqttBri = 20;
+uint8_t mqttBri = 5;
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
@@ -110,46 +114,120 @@ void onConnectionEstablished() {
   client.publish(BASIC_TOPIC_STATUS "on", String(on), MQTT_RETAINED);
 
   ArduinoOTA.begin();
+
+  pixelflutServer.begin();
+  pixelflutServer.setNoDelay(true);
 }
 
-const int SECONDS_BETWEEN_MEASURE = 5;
-const int MQTT_UPDATES_PER_SECOND = 4;
-const int INTERVALS = SECONDS_BETWEEN_MEASURE * MQTT_UPDATES_PER_SECOND;
-const int INTERVAL_WAIT = 1000 / MQTT_UPDATES_PER_SECOND;
-int interval = 0;
+void handlePixelflutInput(WiFiClient &client, String str) {
+  Serial.print("Pixelflut Command: ");
+  Serial.println(str);
 
-int x = 0;
-int y = 0;
+  str.toLowerCase();
+
+  if (str == "help") {
+    client.println("there is no help yet");
+  } else if (str == "size") {
+    char buffer[20];
+    if (snprintf(buffer, sizeof(buffer), "SIZE %d %d", matrix.width(), matrix.height()) >= 0) {
+      client.println(buffer);
+    }
+  } else if (str.startsWith("px")) {
+    auto s = str.c_str();
+    s += 3;
+
+    char *ptr;
+
+    int16_t x = strtol(s, &ptr, 10);
+    int16_t y = strtol(ptr, &ptr, 10);
+
+    auto length = strnlen(ptr, 20);
+
+    if (length == 0) {
+      char buffer[20];
+      if (snprintf(buffer, sizeof(buffer), "PX %d %d unknown", x, y) >= 0) {
+        client.println(buffer);
+      }
+    } else if (length == 6 + 1) {
+      // normal hex color
+      char buffer[20];
+
+      strncpy(buffer, ptr + 1, 2);
+      auto red = strtoul(buffer, 0, 16);
+      strncpy(buffer, ptr + 3, 2);
+      auto green = strtoul(buffer, 0, 16);
+      strncpy(buffer, ptr + 5, 2);
+      auto blue = strtoul(buffer, 0, 16);
+
+      matrix.drawPixel(x, y, matrix.Color(red, green, blue));
+    } else {
+      client.println("colorcode not implemented. Use 6 digit hex color.");
+    }
+  } else {
+    client.println("unknown command. try help");
+  }
+}
+
+void pixelflutLoop() {
+  for (auto i = pixelflutClients.size(); i > 0; i--) {
+    auto client = pixelflutClients.get(i - 1);
+
+    if (client.status() == CLOSED) {
+      pixelflutClients.remove(i - 1);
+
+      Serial.print("Client left. Remaining: ");
+      Serial.println(pixelflutClients.size());
+    }
+  }
+
+  while (pixelflutServer.hasClient()) {
+    auto client = pixelflutServer.available();
+    client.setNoDelay(true);
+    client.flush();
+
+    Serial.print("Client new: ");
+    Serial.print(client.remoteIP().toString());
+    Serial.print(":");
+    Serial.println(client.remotePort());
+
+    pixelflutClients.add(client);
+  }
+
+  for (auto i = 0; i < pixelflutClients.size(); i++) {
+    auto client = pixelflutClients.get(i);
+
+    String input;
+    while (client.available()) {
+      char c = client.read();
+      if (c == '\n') {
+        handlePixelflutInput(client, input);
+        input = "";
+      } else if (c >= 32) {
+        input += c;
+      }
+    }
+  }
+}
+
+unsigned long nextMeasure = 0;
+unsigned long nextMatrixUpdate = 0;
 
 void loop() {
   client.loop();
   ArduinoOTA.handle();
+  pixelflutLoop();
   digitalWrite(LED_BUILTIN, client.isConnected() ? HIGH : LOW);
 
-  matrix.fillScreen(0);
+  auto now = millis();
 
-  if (millis() % 2 == 0) {
-    x++;
-  } else {
-    y++;
+  if (now > nextMatrixUpdate) {
+    nextMatrixUpdate = now + 25;
+    matrix.show();
   }
 
-  if (x >= matrix.width()) {
-    x = 0;
-  }
-  if (y >= matrix.height()) {
-    y = 0;
-  }
-
-  matrix.drawPixel(x, y, matrix.Color(100, 0, 0));
-  matrix.show();
-
-  if (++interval > INTERVALS) {
-    interval = 0;
-  }
-
-  if (interval == 0) {
-    if (client.isConnected()) {
+  if (client.isConnected()) {
+    if (now > nextMeasure) {
+      nextMeasure = now + 5000;
       long rssi = WiFi.RSSI();
       float avgRssi = mkRssi.addMeasurement(rssi);
       Serial.print("RSSI        in dBm:     ");
@@ -158,6 +236,4 @@ void loop() {
       Serial.println(String(avgRssi).c_str());
     }
   }
-
-  delay(INTERVAL_WAIT);
 }
