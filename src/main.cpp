@@ -15,7 +15,7 @@
 #include <LinkedList.h>
 #include <MqttKalmanPublish.h>
 
-#define CLIENT_NAME "espPixelflutMatrix"
+#define CLIENT_NAME "espPixelflut"
 
 EspMQTTClient client(
   WIFI_SSID,
@@ -96,7 +96,7 @@ void setup() {
 void onConnectionEstablished() {
   client.subscribe(BASIC_TOPIC_SET "bri", [](const String & payload) {
     int value = strtol(payload.c_str(), 0, 10);
-    mqttBri = max(1, min(50, value));
+    mqttBri = max(1, min(255, value));
     matrix.setBrightness(mqttBri * on);
     client.publish(BASIC_TOPIC_STATUS "bri", String(mqttBri), MQTT_RETAINED);
   });
