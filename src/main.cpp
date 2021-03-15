@@ -27,6 +27,8 @@ EspMQTTClient client(
 
 const bool MQTT_RETAINED = true;
 
+// #define PRINT_TO_SERIAL
+
 #define BASIC_TOPIC CLIENT_NAME "/"
 #define BASIC_TOPIC_SET BASIC_TOPIC "set/"
 #define BASIC_TOPIC_STATUS BASIC_TOPIC "status/"
@@ -69,10 +71,14 @@ Adafruit_NeoMatrix matrix = Adafruit_NeoMatrix(32, 8, PIN_MATRIX,
 WiFiServer pixelflutServer(1337);
 LinkedList<WiFiClient> pixelflutClients;
 
+MQTTKalmanPublish mkCommandsPerSecond(client, BASIC_TOPIC_STATUS "commands-per-second", false, 12 * 1 /* every 1 min */, 10);
 MQTTKalmanPublish mkRssi(client, BASIC_TOPIC_STATUS "rssi", MQTT_RETAINED, 12 * 5 /* every 5 min */, 10);
 
 boolean on = true;
 uint8_t mqttBri = 5;
+
+uint32_t commands = 0;
+int lastPublishedClientAmount = 0;
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);     // Initialize the BUILTIN_LED pin as an output
@@ -88,7 +94,9 @@ void setup() {
   ArduinoOTA.setHostname(CLIENT_NAME);
 
   // Optional functionnalities of EspMQTTClient
+  #ifdef PRINT_TO_SERIAL
   client.enableDebuggingMessages();
+  #endif
   client.enableHTTPWebUpdater();
   client.enableLastWillMessage(BASIC_TOPIC "connected", "0", MQTT_RETAINED);
 }
@@ -120,8 +128,12 @@ void onConnectionEstablished() {
 }
 
 void handlePixelflutInput(WiFiClient &client, String str) {
+  #ifdef PRINT_TO_SERIAL
   Serial.print("Pixelflut Command: ");
   Serial.println(str);
+  #endif
+
+  commands += 1;
 
   str.toLowerCase();
 
@@ -175,8 +187,10 @@ void pixelflutLoop() {
     if (client.status() == CLOSED) {
       pixelflutClients.remove(i - 1);
 
+      #ifdef PRINT_TO_SERIAL
       Serial.print("Client left. Remaining: ");
       Serial.println(pixelflutClients.size());
+      #endif
     }
   }
 
@@ -185,10 +199,12 @@ void pixelflutLoop() {
     client.setNoDelay(true);
     client.flush();
 
+    #ifdef PRINT_TO_SERIAL
     Serial.print("Client new: ");
     Serial.print(client.remoteIP().toString());
     Serial.print(":");
     Serial.println(client.remotePort());
+    #endif
 
     pixelflutClients.add(client);
   }
@@ -209,8 +225,9 @@ void pixelflutLoop() {
   }
 }
 
-unsigned long nextMeasure = 0;
+unsigned long nextCommandsUpdate = 0;
 unsigned long nextMatrixUpdate = 0;
+unsigned long nextMeasure = 0;
 
 void loop() {
   client.loop();
@@ -221,19 +238,39 @@ void loop() {
   auto now = millis();
 
   if (now > nextMatrixUpdate) {
-    nextMatrixUpdate = now + 25;
+    nextMatrixUpdate = now + 40;
     matrix.show();
   }
 
   if (client.isConnected()) {
+    if (lastPublishedClientAmount != pixelflutClients.size()) {
+      lastPublishedClientAmount = pixelflutClients.size();
+      client.publish(BASIC_TOPIC_STATUS "clients", String(lastPublishedClientAmount), MQTT_RETAINED);
+    }
+
+    if (now > nextCommandsUpdate) {
+      nextCommandsUpdate = now + 5000;
+      auto commands_per_second = commands / 5.0;
+      commands = 0;
+      float avgCps = mkCommandsPerSecond.addMeasurement(commands_per_second);
+      #ifdef PRINT_TO_SERIAL
+      Serial.print("Commands per Second:  ");
+      Serial.print(String(commands_per_second).c_str());
+      Serial.print("   Average: ");
+      Serial.println(String(avgCps).c_str());
+      #endif
+    }
+
     if (now > nextMeasure) {
       nextMeasure = now + 5000;
       long rssi = WiFi.RSSI();
       float avgRssi = mkRssi.addMeasurement(rssi);
+      #ifdef PRINT_TO_SERIAL
       Serial.print("RSSI        in dBm:     ");
       Serial.print(String(rssi).c_str());
       Serial.print("   Average: ");
       Serial.println(String(avgRssi).c_str());
+      #endif
     }
   }
 }
