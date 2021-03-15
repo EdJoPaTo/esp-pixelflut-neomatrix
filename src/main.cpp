@@ -184,7 +184,7 @@ void pixelflutLoop() {
   for (auto i = pixelflutClients.size(); i > 0; i--) {
     auto client = pixelflutClients.get(i - 1);
 
-    if (client.status() == CLOSED) {
+    if (!client.connected()) {
       pixelflutClients.remove(i - 1);
 
       #ifdef PRINT_TO_SERIAL
